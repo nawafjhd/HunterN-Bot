@@ -1,125 +1,121 @@
 import os
 import requests
-from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes
+)
 
-load_dotenv()
-
+# ========= ENV =========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+OTX_API_KEY = os.getenv("OTX_API_KEY")
 VT_API_KEY = os.getenv("VT_API_KEY")
 ABUSE_API_KEY = os.getenv("ABUSE_API_KEY")
-OTX_API_KEY = os.getenv("OTX_API_KEY")
 
-# ------------------ Commands ------------------
-
+# ========= COMMANDS =========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🐺 HunterN IOC Bot\n\n"
-        "استخدم:\n"
-        "/ioc <IP Address>\n\n"
-        "مثال:\n"
-        "/ioc 206.119.191.106"
+        "🧠 HunterN IOC Bot جاهز\n\n"
+        "الأوامر:\n"
+        "/ioc <IP | Domain | Hash>\n"
+        "/help"
     )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "/ioc <IP> - IOC Summary\n"
-        "/help - Help"
+        "📌 الاستخدام:\n"
+        "/ioc 8.8.8.8\n"
+        "/ioc example.com\n"
+        "/ioc <hash>"
     )
-
-# ------------------ IOC Logic ------------------
-
-def vt_ip(ip):
-    url = f"https://www.virustotal.com/api/v3/ip_addresses/{ip}"
-    headers = {"x-apikey": VT_API_KEY}
-    r = requests.get(url, headers=headers)
-    if r.status_code != 200:
-        return None
-    return r.json()
-
-def abuse_ip(ip):
-    url = "https://api.abuseipdb.com/api/v2/check"
-    headers = {
-        "Key": ABUSE_API_KEY,
-        "Accept": "application/json"
-    }
-    params = {"ipAddress": ip, "maxAgeInDays": 90}
-    r = requests.get(url, headers=headers, params=params)
-    if r.status_code != 200:
-        return None
-    return r.json()
-
-def otx_ip(ip):
-    url = f"https://otx.alienvault.com/api/v1/indicators/IPv4/{ip}/general"
-    headers = {"X-OTX-API-KEY": OTX_API_KEY}
-    r = requests.get(url, headers=headers)
-    if r.status_code != 200:
-        return None
-    return r.json()
-
-# ------------------ /ioc Command ------------------
 
 async def ioc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("❌ استخدم: /ioc <IP>")
+        await update.message.reply_text("❌ استخدم: /ioc <indicator>")
         return
 
-    ip = context.args[0]
+    indicator = context.args[0]
 
-    vt = vt_ip(ip)
-    abuse = abuse_ip(ip)
-    otx = otx_ip(ip)
+    message = f"🔎 IoC Summary – {indicator}\n\n"
 
-    risk = "Low"
-    reasons = []
+    # ===== AbuseIPDB =====
+    try:
+        abuse_resp = requests.get(
+            "https://api.abuseipdb.com/api/v2/check",
+            headers={
+                "Key": ABUSE_API_KEY,
+                "Accept": "application/json"
+            },
+            params={
+                "ipAddress": indicator,
+                "maxAgeInDays": 90
+            },
+            timeout=10
+        ).json()
 
-    if abuse and abuse["data"]["abuseConfidenceScore"] >= 50:
-        risk = "⚠️ Medium – High"
-        reasons.append("Reported for abusive activity")
+        data = abuse_resp.get("data", {})
+        score = data.get("abuseConfidenceScore", "N/A")
+        country = data.get("countryCode", "Unknown")
 
-    if vt:
-        stats = vt["data"]["attributes"]["last_analysis_stats"]
-        if stats["malicious"] > 0:
-            risk = "🚨 High"
-            reasons.append("Flagged by VirusTotal engines")
+        message += (
+            "🚩 AbuseIPDB\n"
+            f"- Score: {score}%\n"
+            f"- Country: {country}\n"
+            f"- https://abuseipdb.com/check/{indicator}\n\n"
+        )
+    except Exception:
+        message += "⚠️ AbuseIPDB: no data\n\n"
 
-    if otx and otx.get("pulse_info", {}).get("count", 0) > 0:
-        reasons.append("Seen in OTX threat pulses")
+    # ===== VirusTotal =====
+    try:
+        vt_resp = requests.get(
+            f"https://www.virustotal.com/api/v3/ip_addresses/{indicator}",
+            headers={"x-apikey": VT_API_KEY},
+            timeout=10
+        ).json()
 
-    summary = f"""🔎 IoC Summary – {ip}
+        stats = vt_resp["data"]["attributes"]["last_analysis_stats"]
+        malicious = stats.get("malicious", 0)
 
-Indicator Type: IP Address
-Risk Level: {risk}
-Category: Suspicious / Malicious
+        message += (
+            "🧪 VirusTotal\n"
+            f"- Malicious detections: {malicious}\n"
+            f"- https://www.virustotal.com/gui/ip-address/{indicator}\n\n"
+        )
+    except Exception:
+        message += "⚠️ VirusTotal: no data\n\n"
 
-🧠 Why it’s flagged
-"""
-    if reasons:
-        for r in reasons:
-            summary += f"- {r}\n"
-    else:
-        summary += "- No strong malicious indicators found\n"
+    # ===== OTX =====
+    try:
+        otx_resp = requests.get(
+            f"https://otx.alienvault.com/api/v1/indicators/IPv4/{indicator}/general",
+            headers={"X-OTX-API-KEY": OTX_API_KEY},
+            timeout=10
+        ).json()
 
-    summary += f"""
-🔗 External Reports
-VirusTotal:
-https://www.virustotal.com/gui/ip-address/{ip}
+        pulse_count = otx_resp.get("pulse_info", {}).get("count", 0)
 
-AbuseIPDB:
-https://www.abuseipdb.com/check/{ip}
+        message += (
+            "🧠 AlienVault OTX\n"
+            f"- Pulses: {pulse_count}\n"
+            f"- https://otx.alienvault.com/indicator/ip/{indicator}\n"
+        )
+    except Exception:
+        message += "⚠️ OTX: no data\n"
 
-OTX:
-https://otx.alienvault.com/indicator/ip/{ip}
-"""
+    await update.message.reply_text(message)
 
-    await update.message.reply_text(summary)
+# ========= MAIN =========
+def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# ------------------ App ------------------
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    app.add_handler(CommandHandler("ioc", ioc))
 
-app = ApplicationBuilder().token(BOT_TOKEN).build()
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("help", help_cmd))
-app.add_handler(CommandHandler("ioc", ioc))
+    print("✅ HunterN Bot is running")
+    app.run_polling()
 
-app.run_polling()
+if __name__ == "__main__":
+    main()
